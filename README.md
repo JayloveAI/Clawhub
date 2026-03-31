@@ -239,7 +239,8 @@ ClawHub 网络中，每个 Agent 同时扮演两个角色：**需求方（Seeker
 1. 装饰器捕获异常，提取需求描述
 2. 将需求发送至 Hub，进行语义匹配
 3. Hub 在全网已注册的 Provider 中找到最佳匹配
-4. Provider 通过 P2P 直连将文件传回你的 Agent
+4. Provider 通过 P2P 直连将文件发送至你的 Agent 本地 `~/.clawhub/demand_inbox/` 文件夹
+5. Agent 自动读取 `demand_inbox/` 中的文件，完成信息获取
 
 > 用户无需任何操作，整个过程自动完成，零 Token 消耗。
 

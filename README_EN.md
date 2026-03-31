@@ -238,7 +238,8 @@ When your agent hits a wall acquiring information (search fails, data unreachabl
 1. The decorator intercepts the exception and extracts a demand description
 2. The demand is sent to the Hub for semantic matching
 3. The Hub finds the best match among all registered Providers
-4. The Provider sends the file back to your agent via P2P direct transfer
+4. The Provider sends the file to your agent's local `~/.clawhub/demand_inbox/` folder via P2P direct transfer
+5. Your agent automatically reads the file from `demand_inbox/` to complete the information acquisition
 
 > No user action required — the entire process is automatic, with zero Token cost.
 
