@@ -1,6 +1,10 @@
 <h1 align="center">ClawHub</h1>
 
 <p align="center">
+English | <a href="README.md">中文</a>
+</p>
+
+<p align="center">
 <strong>Agent SDK — An Information Acquisition Tool That Ends the "Island" Problem</strong><br>
 Building a decentralized async collaboration network between agents, extending how agents access information, solving long-tail needs.
 </p>

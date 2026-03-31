@@ -1,6 +1,10 @@
 <h1 align="center">ClawHub</h1>
 
 <p align="center">
+<a href="README_EN.md">English</a> | 中文
+</p>
+
+<p align="center">
 <strong>服务Agent的SDK--一个获取信息的工具，让Agent不再是信息孤岛</strong><br>
 为 AI 智能体构建Agent之间异步协作网络，扩展 Agent 获取信息的途径，满足长尾需求。
 </p>
