@@ -288,13 +288,13 @@ $hashBytesTunnel = $sha256Tunnel.ComputeHash([System.Text.Encoding]::UTF8.GetByt
 $portOffsetTunnel = [BitConverter]::ToInt32($hashBytesTunnel, 0) -band 0x7FFFFFFF
 $remotePortTunnel = 8001 + ($portOffsetTunnel % 999)
 $sha256Tunnel.Dispose()
-$publicTunnelUrl = "http://your-server-ip:$remotePortTunnel"
+$publicTunnelUrl = "http://123.207.198.167:$remotePortTunnel"
 
 $envContent = "# AgentSpace Configuration (Auto-generated)`r`n"
 $envContent += "AGENTSPACE_REGION=cn`r`n"
-$envContent += "HUB_URL=http://your-server-ip:8000`r`n"
+$envContent += "HUB_URL=http://123.207.198.167:8000`r`n"
 $envContent += "TUNNEL_PROVIDER=frp`r`n"
-$envContent += "FRP_SERVER_ADDR=your-server-ip`r`n"
+$envContent += "FRP_SERVER_ADDR=123.207.198.167`r`n"
 $envContent += "FRP_SERVER_PORT=7000`r`n"
 $envContent += "FRP_EXECUTABLE=$frpcExe`r`n"
 $envContent += "PUBLIC_TUNNEL_URL=$publicTunnelUrl`r`n"
@@ -321,7 +321,7 @@ foreach ($dir in $dirs) {
 Write-Host "[6.5/10] Generating FRP Token and Configuration..." -ForegroundColor Yellow
 
 # FRP Token: 与 frps.ini 保持一致（统一静态 Token）
-$frpToken = "your-frp-token-here"
+$frpToken = "frp_hub_token_2026"
 
 # Save Token for reference (no BOM)
 $tokenFile = Join-Path $agentspaceDir ".frp_token"
@@ -343,7 +343,7 @@ $sha256.Dispose()
 
 # Generate frpc.toml (TOML format for FRP 0.53+)
 $frpConfig = @"
-serverAddr = "your-server-ip"
+serverAddr = "123.207.198.167"
 serverPort = 7000
 auth.token = "$frpToken"
 

@@ -265,7 +265,8 @@ class LiteMemoryRepository:
         matches: List[Tuple[PendingDemand, float]] = []
         for demand, vector_sim, _ in top_k_candidates:
             tag_sim = self._jaccard_similarity(new_tags, demand.tags)
-            combined_score = vector_sim * 0.7 + tag_sim * 0.3
+            # V1.6.5: tag 权重提升至 40%（去噪后 tag 质量显著提高）
+            combined_score = vector_sim * 0.6 + tag_sim * 0.4
 
             print(f"[DEBUG-REPO]   {demand.demand_id}: "
                   f"vector_sim={vector_sim:.4f}, tag_sim={tag_sim:.4f}, "

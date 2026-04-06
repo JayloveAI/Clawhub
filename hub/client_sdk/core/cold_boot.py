@@ -54,12 +54,16 @@ async def sync_supply_to_hub(agent_id: str, workspace: Path) -> dict:
 
     published = 0
     matched = 0
+    delivered = 0
+    undeliverable = 0
     errors = 0
     hub_url = f"{HUB_URL}{API_V1_PREFIX}"
+    sender = P2PSender()
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         for file_entry in inventory_files:
             filename = file_entry.get("filename", "")
+            local_path = file_entry.get("local_path", str(supply_dir / filename))
             tags = file_entry.get("entity_tags", [])
 
             if not tags:
@@ -86,6 +90,26 @@ async def sync_supply_to_hub(agent_id: str, workspace: Path) -> dict:
                     matched += len(demands)
                     if demands:
                         print(f"[COLD-BOOT] ✅ {filename} matched {len(demands)} demand(s)")
+                        # 🌟 投递文件到匹配的需求方
+                        for demand in demands:
+                            webhook_url = demand.get("seeker_webhook_url", "")
+                            if webhook_url:
+                                try:
+                                    success = await sender.send_file_to_seeker(
+                                        matched_demand=demand,
+                                        file_path=local_path,
+                                        provider_id=agent_id,
+                                    )
+                                    if success:
+                                        delivered += 1
+                                        print(f"[COLD-BOOT] 📦 Delivered to {demand.get('demand_id', '?')[:12]}...")
+                                    else:
+                                        print(f"[COLD-BOOT] ⚠️ Delivery failed for {demand.get('demand_id', '?')[:12]}...")
+                                except Exception as e:
+                                    print(f"[COLD-BOOT] ⚠️ Delivery error: {e}")
+                            else:
+                                undeliverable += 1
+                                print(f"[COLD-BOOT] ⚠️ Demand {demand.get('demand_id', '?')[:12]}... has no webhook_url, cannot deliver")
                 else:
                     errors += 1
                     print(f"[COLD-BOOT] ⚠️ {filename}: Hub returned {response.status_code}")
@@ -93,8 +117,8 @@ async def sync_supply_to_hub(agent_id: str, workspace: Path) -> dict:
                 errors += 1
                 print(f"[COLD-BOOT] ⚠️ {filename}: {e}")
 
-    print(f"[COLD-BOOT] Summary: {published} published, {matched} matched, {errors} errors")
-    return {"published": published, "matched": matched, "errors": errors}
+    print(f"[COLD-BOOT] Summary: {published} published, {matched} matched, {delivered} delivered, {undeliverable} undeliverable, {errors} errors")
+    return {"published": published, "matched": matched, "delivered": delivered, "undeliverable": undeliverable, "errors": errors}
 
 
 async def cold_boot_sync(agent_id: str, public_webhook_url: str, workspace: Path):

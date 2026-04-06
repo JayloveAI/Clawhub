@@ -485,18 +485,53 @@ FRP_EXECUTABLE=frpc
     webhook_thread.start()
     click.echo(f"📡 Webhook server listening on port {webhook_port}")
 
-    # Optionally start tunnel
+    # Start FRP tunnel (V1.6.5: auto-start using deploy_all generated config)
     tunnel_url = None
     if not no_tunnel:
-        tunnel_provider = os.getenv('TUNNEL_PROVIDER', 'auto')
-        click.echo(f"🌐 Setting up network tunnel (Provider: {tunnel_provider})...")
-        try:
-            tunnel_manager = TunnelManager()
-            # Try different tunnel providers in order
-            tunnel_url = asyncio.run(tunnel_manager.start(webhook_port))
-            click.echo(f"   Tunnel URL: {tunnel_url}")
-        except Exception as e:
-            click.echo(f"⚠️  Tunnel setup failed: {e}")
+        frp_dir = workspace / "frp"
+        frpc_exe = os.getenv("FRP_EXECUTABLE", str(frp_dir / "frpc.exe"))
+        frpc_toml = frp_dir / "frpc.toml"
+        public_tunnel_url = os.getenv("PUBLIC_TUNNEL_URL", "")
+
+        if frpc_toml.exists() and Path(frpc_exe).exists():
+            click.echo("🌐 Starting FRP tunnel (using frpc.toml)...")
+            try:
+                # Kill any existing frpc process to avoid conflicts
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/IM", "frpc.exe"],
+                                 capture_output=True, timeout=5)
+                else:
+                    subprocess.run(["pkill", "-f", "frpc"],
+                                 capture_output=True, timeout=5)
+
+                # Start frpc with deploy_all generated config
+                frp_process = subprocess.Popen(
+                    [frpc_exe, "-c", str(frpc_toml)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                import time; time.sleep(2)
+
+                if frp_process.poll() is None:
+                    tunnel_url = public_tunnel_url
+                    click.echo(f"   ✅ FRP tunnel active: {tunnel_url}")
+                else:
+                    click.echo(f"   ⚠️  FRP process exited with code {frp_process.returncode}")
+            except Exception as e:
+                click.echo(f"   ⚠️  FRP start failed: {e}")
+        else:
+            # Fallback: try TunnelManager
+            tunnel_provider = os.getenv('TUNNEL_PROVIDER', 'auto')
+            click.echo(f"🌐 Setting up network tunnel (Provider: {tunnel_provider})...")
+            try:
+                tunnel_manager = TunnelManager()
+                tunnel_url = asyncio.run(tunnel_manager.start(webhook_port))
+                click.echo(f"   Tunnel URL: {tunnel_url}")
+            except Exception as e:
+                click.echo(f"   ⚠️  Tunnel setup failed: {e}")
+
+        if not tunnel_url:
             click.echo("   Continuing without tunnel (local only)")
 
     # Initialize services

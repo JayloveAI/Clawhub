@@ -321,8 +321,17 @@ async def create_pending_demand(payload: dict):
     tags = payload.get("tags", [])
     description = payload.get("description", "")
 
-    # Generate real semantic vector (with timeout)
-    tag_text = " ".join(tags) + " " + description
+    # Extract clean tags from description if tags are empty or noisy
+    from hub_server.utils_tag_utils import extract_and_clean, clean_extract_tags
+    extracted = extract_and_clean(description) if description else []
+    tags = clean_extract_tags(tags) if tags else []
+    # Merge: user-provided tags + extracted tags, dedup
+    all_tags = sorted(set(tags + extracted))
+    if all_tags:
+        tags = all_tags
+
+    # Generate semantic vector from clean tags (not raw noisy description)
+    tag_text = " ".join(tags) if tags else description
     try:
         demand_vector = await asyncio.wait_for(
             embedding_service.get_embedding(tag_text),
@@ -413,7 +422,14 @@ async def handle_supply_announcement(agent_id: str, payload: dict):
 
     repo = get_repository()
     tags = payload.get("tags", [])
+    description = payload.get("description", "")
     supply_vector = payload.get("supply_vector")
+
+    # Extract clean tags from description if tags are sparse
+    from hub_server.utils_tag_utils import extract_and_clean, clean_extract_tags
+    cleaned_tags = clean_extract_tags(tags) if tags else []
+    extracted = extract_and_clean(description) if description else []
+    tags = sorted(set(cleaned_tags + extracted)) or tags
 
     # 🔍 Debug logging
     print(f"[DEBUG-HUB] ========== Supply Announcement ==========")
