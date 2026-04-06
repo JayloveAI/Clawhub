@@ -64,8 +64,8 @@ echo [5/8] 创建环境配置...
 if not exist .env (
     echo DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agent_hub > .env
     echo EMBEDDING_PROVIDER=glm >> .env
-    echo GLM_API_KEY=a6fd75f395f545a1972483cf8fd46549.jmTm8fXJ5X6Oyaec >> .env
-    echo GLM_EMBEDDING_MODEL=embedding-2 >> .env
+    echo GLM_API_KEY=e6edc7b93f2d4b1e8280b73d37228e40.pOs5JhSDSFOxqcfG >> .env
+    echo GLM_EMBEDDING_MODEL=embedding-3 >> .env
     echo HUB_JWT_SECRET=change-me-in-production >> .env
     echo 配置文件已创建
 ) else (

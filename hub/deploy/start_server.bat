@@ -10,7 +10,7 @@ echo ========================================
 echo.
 
 REM 设置环境变量
-set GLM_API_KEY=a6fd75f395f545a1972483cf8fd46549.jmTm8fXJ5X6Oyaec
+set GLM_API_KEY=e6edc7b93f2d4b1e8280b73d37228e40.pOs5JhSDSFOxqcfG
 set EMBEDDING_PROVIDER=glm
 
 echo [配置] Embedding Provider: GLM

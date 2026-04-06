@@ -111,16 +111,27 @@ class EntityExtractor:
         return tags
 
     def _extract_from_description(self, description: str) -> set[str]:
-        """从描述文本提取标签"""
+        """从描述文本提取标签
+
+        V1.6.6: 引号/书名号内容同时保留完整短语 + tokenized 版本，
+        确保复合词（如"逆向工程"）不被 jieba 切碎后丢失。
+        """
         tags = set()
 
         # 1. 提取书名号、方括号、引号中的内容
         for pattern in self.CHINESE_TOPIC_PATTERNS:
             matches = re.findall(pattern, description)
             for match in matches:
+                match = match.strip()
+                # 去掉末尾标点
+                match_clean = re.sub(r'[：:，,。.！!？?；;]+$', '', match).strip()
+                # 保留完整复合词（如果长度 >= 2 且含中文或英文词）
+                if len(match_clean) >= 2 and re.search(r'[a-zA-Z\u4e00-\u9fff]', match_clean):
+                    tags.add(match_clean.lower())
+                # 同时也做 tokenized 提取
                 tags.update(extract_multilingual_tokens(match))
 
-        # 2. 统一分词提取（替代 CamelCase 正则 + 中文正则切分）
+        # 2. 统一分词提取
         tags.update(extract_multilingual_tokens(description))
 
         return tags
