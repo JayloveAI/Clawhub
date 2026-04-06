@@ -1,8 +1,100 @@
 """Cold boot sync - Event-driven P2P delivery initialization."""
 import asyncio
+import json
 from pathlib import Path
 from ..webhook.sender import P2PSender
-from ..config import HUB_URL
+from ..config import HUB_URL, API_V1_PREFIX
+from .entity_extractor import EntityExtractor
+
+
+async def sync_supply_to_hub(agent_id: str, workspace: Path) -> dict:
+    """
+    V1.6.4: 无条件同步 - 将 inventory 中所有存量供给上报到 Hub。
+
+    不管 tunnel 是否可用，只要 supply_provided 中有文件，
+    就逐个调用 Hub 的 supply endpoint 进行语义匹配。
+
+    Args:
+        agent_id: Agent ID
+        workspace: 工作空间路径
+
+    Returns:
+        {"published": int, "matched": int, "errors": int}
+    """
+    supply_dir = workspace / "supply_provided"
+    inventory_file = workspace / "inventory_map.json"
+
+    if not supply_dir.exists() or not any(supply_dir.iterdir()):
+        return {"published": 0, "matched": 0, "errors": 0}
+
+    # 从 inventory_map.json 读取已有文件信息（含 tags）
+    inventory_files = []
+    if inventory_file.exists():
+        try:
+            data = json.loads(inventory_file.read_text(encoding="utf-8"))
+            inventory_files = data.get("files", [])
+        except Exception:
+            pass
+
+    # 如果 inventory 为空但目录有文件，扫描并提取 tags
+    if not inventory_files:
+        extractor = EntityExtractor()
+        for f in supply_dir.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                tags = extractor.extract_tags(f.name)
+                inventory_files.append({
+                    "filename": f.name,
+                    "local_path": str(f),
+                    "entity_tags": tags,
+                    "file_type": f.suffix,
+                    "size_bytes": f.stat().st_size,
+                })
+
+    import httpx
+
+    published = 0
+    matched = 0
+    errors = 0
+    hub_url = f"{HUB_URL}{API_V1_PREFIX}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for file_entry in inventory_files:
+            filename = file_entry.get("filename", "")
+            tags = file_entry.get("entity_tags", [])
+
+            if not tags:
+                extractor = EntityExtractor()
+                tags = extractor.extract_tags(filename)
+
+            payload = {
+                "agent_id": agent_id,
+                "resource_type": file_entry.get("file_type", filename.rsplit(".", 1)[-1] if "." in filename else "file").lstrip("."),
+                "tags": tags,
+                "supply_vector": None,
+                "description": filename,
+            }
+
+            try:
+                response = await client.post(
+                    f"{hub_url}/agents/{agent_id}/supply",
+                    json=payload,
+                )
+                if response.status_code == 200:
+                    published += 1
+                    data = response.json()
+                    demands = data.get("matched_demands", [])
+                    matched += len(demands)
+                    if demands:
+                        print(f"[COLD-BOOT] ✅ {filename} matched {len(demands)} demand(s)")
+                else:
+                    errors += 1
+                    print(f"[COLD-BOOT] ⚠️ {filename}: Hub returned {response.status_code}")
+            except Exception as e:
+                errors += 1
+                print(f"[COLD-BOOT] ⚠️ {filename}: {e}")
+
+    print(f"[COLD-BOOT] Summary: {published} published, {matched} matched, {errors} errors")
+    return {"published": published, "matched": matched, "errors": errors}
 
 
 async def cold_boot_sync(agent_id: str, public_webhook_url: str, workspace: Path):

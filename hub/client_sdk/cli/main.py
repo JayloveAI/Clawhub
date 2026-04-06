@@ -540,15 +540,26 @@ FRP_EXECUTABLE=frpc
 
     click.echo("👀 Watching for files in supply_provided/")
 
-    # 🌟 [新增] 冷启动同步：向 Hub 发送状态更新
+    # 🌟 [V1.6.4] 无条件同步：向 Hub 上报所有存量供给（不依赖 tunnel）
+    click.echo("📡 Syncing inventory to Hub...")
+    try:
+        from ..core.cold_boot import sync_supply_to_hub
+        sync_result = loop.run_until_complete(
+            sync_supply_to_hub(agent_id, workspace)
+        )
+        published = sync_result.get("published", 0)
+        matched = sync_result.get("matched", 0)
+        errors = sync_result.get("errors", 0)
+        click.echo(f"   ✅ Supply sync: {published} file(s) published, {matched} demand(s) matched, {errors} error(s)")
+    except Exception as e:
+        click.echo(f"   ⚠️  Supply sync failed: {e}")
+
+    # 🌟 冷启动状态同步（仅 tunnel 可用时）
     if tunnel_url:
         click.echo("📡 Syncing status to cloud Hub...")
-
-        # 异步执行冷启动同步
         from ..core.cold_boot import cold_boot_sync
-
         try:
-            asyncio.run(cold_boot_sync(agent_id, tunnel_url, workspace))
+            loop.run_until_complete(cold_boot_sync(agent_id, tunnel_url, workspace))
             click.echo("   ✅ Status sync completed")
         except Exception as e:
             click.echo(f"   ⚠️  Status sync failed: {e}")
