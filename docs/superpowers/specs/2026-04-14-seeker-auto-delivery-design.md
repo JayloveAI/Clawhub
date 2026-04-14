@@ -50,9 +50,9 @@ pending  -->  matched  -->  delivered
 - `delivered`: File successfully delivered to Seeker
 - `failed`: Delivery attempted but failed (timeout, Seeker offline again, etc.)
 
-## Files to Modify
+## Files to Modify (4 files)
 
-### 1. `hub/hub_server/api/routes.py` — PATCH /status enhancement
+### 1. `hub/hub_server/api/routes.py` — PATCH /status enhancement + new endpoint
 
 **Current**: `update_agent_status` returns empty `delivery_tasks=[]` with a TODO comment.
 
@@ -112,12 +112,52 @@ async def _send_wake_up_to_provider(provider_url: str, demand: PendingDemand, se
 }
 ```
 
+### 4. `hub/hub_server/api/routes.py` — new `/demand_status` endpoint
+
+**Why needed**: The existing `POST /task_completed` requires a JWT `match_token` in `TaskCompletedRequest`. The Provider's wake_up handler does not have a match_token (it receives the signal from Hub, not from a direct match response). A lightweight endpoint avoids JWT contract mismatch.
+
+```python
+@router.put("/demand_status")
+async def update_demand_status(payload: dict):
+    """Update demand status (delivered/failed). Called by Provider after wake_up delivery."""
+    demand_id = payload.get("demand_id")
+    new_status = payload.get("status")  # "delivered" or "failed"
+    repo = get_repository()
+    if new_status == "delivered":
+        repo.mark_delivered(demand_id)
+    elif new_status == "failed":
+        repo.mark_failed(demand_id, payload.get("error", ""))
+    return {"status": "ok", "demand_id": demand_id, "new_status": new_status}
+```
+
+### 5. `hub/hub_server/services/lite_repository.py` — atomic mark_delivered
+
+`mark_delivered` uses `UPDATE ... WHERE status = 'matched'` and checks `rowcount` to handle multi-provider race conditions:
+
+```python
+def mark_delivered(self, demand_id: str) -> bool:
+    """Atomically mark demand as delivered. Returns False if already delivered."""
+    with sqlite3.connect(self.db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE pending_demands SET status = 'delivered' WHERE demand_id = ? AND status = 'matched'",
+            (demand_id,)
+        )
+        return cursor.rowcount > 0
+```
+
+`mark_failed` is deferred — no caller triggers it in the current design. Add when retry logic is implemented.
+
+### 6. `hub/client_sdk/webhook/server.py` — use deliver_file() + description matching
+
+- Use `sender.deliver_file()` instead of `sender.send_file_to_seeker()` for automatic base64/stream/R2 strategy selection.
+- Enhance `_find_file_for_demand_safe` to use description keywords as tiebreaker when multiple files match the extension.
+
 **Post-delivery confirmation**:
 ```python
-# After P2PSender succeeds
+# After deliver_file() succeeds, call Hub's lightweight endpoint
 async with httpx.AsyncClient(timeout=5.0) as client:
-    await client.post(
-        f"{HUB_URL}{API_V1_PREFIX}/task_completed",
+    await client.put(
+        f"{HUB_URL}{API_V1_PREFIX}/demand_status",
         json={"demand_id": demand_id, "status": "delivered", "provider_id": provider_id}
     )
 ```
@@ -131,9 +171,14 @@ async with httpx.AsyncClient(timeout=5.0) as client:
 | demand has no matched_agent_id | Skip (never matched, nothing to deliver). |
 | Provider webhook_url unknown | Skip that demand, don't include in delivery_tasks. |
 | Delivery fails (Seeker goes offline again) | Provider does NOT mark as delivered. Demand stays `matched`. Next Seeker online cycle retries. |
-| Multiple Providers matched same demand | Each Provider gets wake_up signal. First delivery marks `delivered`, subsequent Providers skip. |
+| Multiple Providers matched same demand | Each Provider gets wake_up signal. `mark_delivered` uses `WHERE status='matched'` — first UPDATE wins, subsequent get `rowcount=0` and skip. |
 
 ## What This Does NOT Cover
+
+- Retry queue with exponential backoff (can be added later if needed)
+- Seeker polling for delivery status (delivery_tasks response is informational only)
+- Provider periodic polling for pending deliveries (existing `sync_supply_to_hub` covers cold-start)
+- `mark_failed` state (deferred — no caller triggers it yet, add with retry logic)
 
 - Retry queue with exponential backoff (can be added later if needed)
 - Seeker polling for delivery status (delivery_tasks response is informational only)
