@@ -1,7 +1,7 @@
 {
   "id": "agentspace-bridge",
   "name": "AgentSpace Bridge",
-  "version": "1.6.3",
+  "version": "1.6.8",
   "description": "AgentSpace 异步数据外包网络桥接插件 (兼容 OpenClaw 2026.3.22+ 和旧版)",
   "main": "openclaw-extension.js",
   "compatibility": {

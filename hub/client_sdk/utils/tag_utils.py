@@ -13,6 +13,7 @@ V2.0 重构：
 
 import re
 from typing import Optional
+from pathlib import Path
 
 # ======================
 # 【jieba 懒加载】
@@ -27,6 +28,76 @@ def _ensure_jieba():
         import jieba
         jieba.setLogLevel(20)  # WARNING 级别，抑制 verbose 日志
         _jieba_initialized = True
+        # 自动加载已有用户词库
+        _load_compound_dict()
+
+
+# ======================
+# 【动态用户词库】防止复合词被 jieba 碎化
+# ======================
+_COMPOUND_DICT_PATH = Path.home() / ".agentspace" / "compound_dict.txt"
+_compound_dict_loaded = False
+
+
+def build_compound_dict_from_text(text: str) -> list[str]:
+    """从文本中提取应作为整体的复合词，用于 jieba 用户词库。
+
+    提取策略：
+    - 引号/书名号内的完整内容（≥4字）
+    - 数字+中文名词短语（如 "49指标驱动智能交易系统"）
+    """
+    compounds = set()
+    # 1. 引号/书名号内的完整内容
+    for pattern in [r"《([^》]+)》", r"【([^】]+)】", r'"([^"]+)"']:
+        for m in re.findall(pattern, text):
+            m_clean = re.sub(r'[：:，,。.！!？?；;]+$', '', m).strip()
+            if len(m_clean) >= 4:
+                compounds.add(m_clean)
+    # 2. 数字+中文名词短语（高频模式）
+    for m in re.findall(r'\d+[\u4e00-\u9fff][\u4e00-\u9fff\w]{2,}', text):
+        compounds.add(m)
+    return list(compounds)
+
+
+def update_compound_dict(description: str) -> None:
+    """从 description 中发现新复合词，追加到用户词库并热加载到 jieba。
+
+    词库持久化在 ~/.agentspace/compound_dict.txt，越用越准。
+    """
+    new_compounds = build_compound_dict_from_text(description)
+    if not new_compounds:
+        return
+
+    existing = set()
+    if _COMPOUND_DICT_PATH.exists():
+        existing = set(_COMPOUND_DICT_PATH.read_text(encoding="utf-8").splitlines())
+
+    to_add = set(new_compounds) - existing
+    if not to_add:
+        return
+
+    _COMPOUND_DICT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _COMPOUND_DICT_PATH.write_text(
+        "\n".join(sorted(existing | to_add)), encoding="utf-8"
+    )
+
+    # 热加载到 jieba
+    import jieba
+    jieba.load_userdict(str(_COMPOUND_DICT_PATH))
+
+
+def _load_compound_dict() -> None:
+    """加载已有用户词库到 jieba（启动时调用一次）"""
+    global _compound_dict_loaded
+    if _compound_dict_loaded or not _COMPOUND_DICT_PATH.exists():
+        _compound_dict_loaded = True
+        return
+    try:
+        import jieba
+        jieba.load_userdict(str(_COMPOUND_DICT_PATH))
+    except Exception:
+        pass
+    _compound_dict_loaded = True
 
 
 # ======================

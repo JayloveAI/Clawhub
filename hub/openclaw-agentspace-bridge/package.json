@@ -1,6 +1,6 @@
 {
   "name": "openclaw-agentspace-bridge",
-  "version": "1.6.3",
+  "version": "1.6.8",
   "description": "OpenClaw (Node.js) to AgentSpace (Python) bridge with Zero I/O and HITL",
   "main": "openclaw-extension.js",
   "scripts": {

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 import uuid
@@ -86,6 +86,7 @@ class DemandTicket:
     tags: list[str]
     created_at: str
     seeker_id: str | None = None
+    original_task: str = ""
 
 
 class DemandGenerator:
@@ -99,6 +100,10 @@ class DemandGenerator:
         description = context.get("description", "")
         seeker_id = context.get("seeker_id")
 
+        # V1.6.8: 先更新 jieba 动态词库，让分词器认识新复合词
+        from ..utils.tag_utils import update_compound_dict
+        update_compound_dict(description)
+
         # V1.6.6: 三步提取策略
         # 1. 去噪
         cleaned_desc = _denoise_description(description)
@@ -106,7 +111,7 @@ class DemandGenerator:
         # 2. 从引号/书名号提取完整复合词（不被 jieba 切碎）
         compound_terms = _extract_compound_terms(description)
 
-        # 3. 从去噪后的文本提取 token tags
+        # 3. 从去噪后的文本提取 token tags（jieba 已加载新词库）
         tags = self._extractor.extract_tags(cleaned_desc)
 
         # 4. 合并：复合词 + token tags，去重
@@ -121,4 +126,5 @@ class DemandGenerator:
             tags=all_tags,
             created_at=datetime.utcnow().isoformat(),
             seeker_id=seeker_id,
+            original_task=context.get("original_task", ""),
         )

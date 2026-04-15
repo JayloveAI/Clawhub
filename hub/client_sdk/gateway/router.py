@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -192,17 +192,6 @@ class UniversalResourceGateway:
                     resource_type=task_ctx.resource_type,
                 )
                 self._task_cache.update_status(demand_id, "failed")
-        context = {
-            "resource_type": getattr(error, "resource_type", "resource"),
-            "description": getattr(error, "description", ""),
-            "local_skills": self.config.get("local_skills", []),
-        }
-
-        result = await self._try_local_skills(context)
-        if result is not None:
-            return result
-
-        return await self._try_global_bounty(context)
 
     async def _try_local_skills(self, context: dict) -> Any:
         """
@@ -289,6 +278,7 @@ class UniversalResourceGateway:
             "seeker_id": ticket.seeker_id,
             "seeker_webhook_url": webhook_url,
             "created_at": ticket.created_at,
+            "original_task": ticket.original_task,
         }
         print(f"[DEBUG-PUBLISH] payload: {payload}")
 

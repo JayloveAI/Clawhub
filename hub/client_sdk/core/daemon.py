@@ -121,10 +121,37 @@ FRP_SERVER_PORT={config.get("frp_port", "7000")}
                 except Exception as e:
                     print(f"[WARNING] 状态同步失败: {e}")
 
-            # 6. 启动文件监控
+            # 6. 启动文件监控（含 supply 同步和 Hub 发布回调）
             from ..core.workspace import WorkspaceWatchdog
-            watchdog = WorkspaceWatchdog(workspace_path=workspace)
+            from ..core.supply_publisher import SupplyPublisher
+            from ..core.cold_boot import sync_supply_to_hub
+            from .utils import get_or_create_agent_id
+
+            agent_id = get_or_create_agent_id(workspace)
+            publisher = SupplyPublisher(agent_id)
+
+            def _on_file_detected(file_info, tags):
+                """新文件放入 supply_provided 时自动发布到 Hub"""
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(publisher.publish_supply(file_info, tags))
+                except RuntimeError:
+                    asyncio.run(publisher.publish_supply(file_info, tags))
+
+            watchdog = WorkspaceWatchdog(
+                workspace_path=workspace,
+                agent_id=agent_id,
+                on_file_callback=_on_file_detected,
+            )
             observer = watchdog.start()
+
+            # 7. 无条件同步：向 Hub 上报所有存量供给
+            try:
+                sync_result = await sync_supply_to_hub(agent_id, workspace)
+                print(f"[AgentSpace] Supply sync: {sync_result.get('published', 0)} published, "
+                      f"{sync_result.get('matched', 0)} matched")
+            except Exception as e:
+                print(f"[WARNING] Supply sync failed: {e}")
 
             self.running = True
             print(f"[AgentSpace] 守护进程已启动，工作空间: {workspace}")

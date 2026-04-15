@@ -13,7 +13,10 @@ V1.6 Updates:
 - Supply endpoint now returns match_token for P2P communication
 """
 import asyncio
+import sys
+import os
 import numpy as np
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from datetime import datetime
 from hub_server.api.contracts import (
@@ -281,8 +284,34 @@ async def update_agent_status(agent_id: str, request: StatusUpdateRequest):
         delivery_tasks = []
 
         if request.node_status == "active" and request.webhook_url:
-            # TODO: 添加数据库查询和事件触发逻辑
-            pass
+            # V1.6.8: Seeker 上线自动投递 — 查询 matched 但未投递的 demands
+            from hub_server.services.lite_repository import get_repository
+            repo = get_repository()
+            matched_demands = repo.get_matched_demands_for_seeker(agent_id)
+
+            for demand in matched_demands:
+                provider_id = demand.matched_agent_id
+                if not provider_id:
+                    continue
+
+                provider_info = _agent_store.get(provider_id, {})
+                provider_webhook = provider_info.get("webhook_url", "")
+                if not provider_webhook:
+                    continue
+
+                # 异步发送 wake_up 信号给 Provider
+                asyncio.create_task(
+                    _send_wake_up_to_provider(provider_webhook, demand, request.webhook_url)
+                )
+
+                delivery_tasks.append({
+                    "demand_id": demand.demand_id,
+                    "resource_type": demand.resource_type,
+                    "provider_id": provider_id,
+                })
+
+            if delivery_tasks:
+                print(f"[HUB] Seeker {agent_id} online: {len(delivery_tasks)} matched demand(s) pending delivery")
 
         return StatusUpdateResponse(
             agent_id=agent_id,
@@ -305,6 +334,60 @@ async def update_agent_status(agent_id: str, request: StatusUpdateRequest):
         )
 
 # ---------------------------------------------------------------------------
+# V1.6.8: Wake-up Signal Helper
+# ---------------------------------------------------------------------------
+
+async def _send_wake_up_to_provider(provider_url: str, demand, seeker_webhook_url: str):
+    """向 Provider 发送 wake_up_delivery 信号（fire-and-forget，不阻塞 Seeker 上线响应）"""
+    import httpx
+    payload = {
+        "action": "wake_up_delivery",
+        "demand_id": demand.demand_id,
+        "new_seeker_url": seeker_webhook_url,
+        "resource_type": demand.resource_type,
+        "description": demand.description,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{provider_url}/api/webhook/signal", json=payload)
+            print(f"[HUB] wake_up signal sent to {provider_url} for demand {demand.demand_id[:12]}... (HTTP {resp.status_code})")
+    except Exception as e:
+        print(f"[HUB] wake_up signal failed for {provider_url}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# V1.6.8: Delivery Status Update (Provider -> Hub, no JWT required)
+# ---------------------------------------------------------------------------
+
+@router.put("/demand_status")
+async def update_demand_status(payload: dict):
+    """
+    Provider 投递完成后更新 demand 状态。
+    独立于 /task_completed（后者需要 JWT match_token），此端点用于 wake_up 投递确认。
+    """
+    from hub_server.services.lite_repository import get_repository
+    demand_id = payload.get("demand_id")
+    new_status = payload.get("status")
+
+    if not demand_id or new_status not in ("delivered", "failed"):
+        raise HTTPException(status_code=400, detail="demand_id and valid status (delivered/failed) required")
+
+    repo = get_repository()
+
+    if new_status == "delivered":
+        ok = repo.mark_delivered(demand_id)
+        if not ok:
+            print(f"[HUB] mark_delivered skipped (already delivered or not matched): {demand_id[:12]}...")
+            return {"status": "skipped", "demand_id": demand_id, "reason": "not in matched state"}
+        print(f"[HUB] Demand {demand_id[:12]}... marked as delivered")
+    else:
+        # future: mark_failed
+        pass
+
+    return {"status": "ok", "demand_id": demand_id, "new_status": new_status}
+
+
+# ---------------------------------------------------------------------------
 # V1.5: Pending Demands (best-effort in-memory store)
 # ---------------------------------------------------------------------------
 _pending_demands = []
@@ -320,18 +403,39 @@ async def create_pending_demand(payload: dict):
     # Generate vector from tags/description for semantic matching
     tags = payload.get("tags", [])
     description = payload.get("description", "")
+    original_task = payload.get("original_task", "")
 
-    # Extract clean tags from description if tags are empty or noisy
+    # Phase 3: 客户端 tags 优先（已过三步去噪 pipeline），Hub 提取仅作补充
     from hub_server.utils_tag_utils import extract_and_clean, clean_extract_tags
+    client_tags = clean_extract_tags(tags) if tags else []
     extracted = extract_and_clean(description) if description else []
-    tags = clean_extract_tags(tags) if tags else []
-    # Merge: user-provided tags + extracted tags, dedup
-    all_tags = sorted(set(tags + extracted))
+    all_tags = sorted(set(client_tags + extracted))
     if all_tags:
         tags = all_tags
 
-    # Generate semantic vector from clean tags (not raw noisy description)
+    # Fallback: tags 仍为空时，重新从 description 提取（使用更宽松的分词）
+    if not tags and description:
+        from hub_server.utils_tag_utils import extract_multilingual_tokens
+        raw_tokens = extract_multilingual_tokens(description)
+        if raw_tokens:
+            tags = raw_tokens
+        else:
+            # 终极兜底：用 description 前缀作为 tag（确保向量有语义内容）
+            tags = [description[:30].strip()]
+
+    # Phase 2: 智能截断 + tags 权重翻倍 + original_task 语义融合
+    def _safe_truncate(text: str, max_chars: int = 500) -> str:
+        """智能截断：保留首尾，丢弃中间"""
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2
+        return text[:half] + text[-half:]
+
     tag_text = " ".join(tags) if tags else description
+    if original_task:
+        # tags 重复拼接提升 TF-IDF 权重 + original_task 智能截断
+        tag_text = " ".join(tags) + " " + " ".join(tags) + " " + _safe_truncate(original_task)
+
     try:
         demand_vector = await asyncio.wait_for(
             embedding_service.get_embedding(tag_text),
@@ -349,6 +453,7 @@ async def create_pending_demand(payload: dict):
         demand_id=payload.get("demand_id"),
         resource_type=payload.get("resource_type", ""),
         description=description,
+        original_task=original_task,
         tags=tags,
         demand_vector=demand_vector,
         seeker_id=payload.get("seeker_id"),
@@ -389,6 +494,7 @@ async def list_pending_demands(seeker_id: str = None):
                 "demand_id": d.demand_id,
                 "resource_type": d.resource_type,
                 "description": d.description,
+                "original_task": d.original_task,
                 "tags": d.tags,
                 "seeker_id": d.seeker_id,
                 "status": d.status,
@@ -468,6 +574,11 @@ async def handle_supply_announcement(agent_id: str, payload: dict):
     print(f"[DEBUG-HUB] Matched demands count: {len(matched_demands)}")
     for m in matched_demands:
         print(f"[DEBUG-HUB]   ✓ Matched: demand_id={m.demand_id}, resource_type={m.resource_type}, webhook={m.seeker_webhook_url}")
+
+    # V1.6.8: 匹配成功后标记 demand 为 matched，记录 provider agent_id
+    for demand in matched_demands:
+        repo.mark_matched(demand.demand_id, agent_id)
+
     print(f"[DEBUG-HUB] ========================================")
 
     # 格式化返回结果 - V1.6: 添加 match_token
@@ -519,3 +630,79 @@ async def delete_pending_demand(demand_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Demand {demand_id} not found"
         )
+
+
+# ==========================================
+# Admin: Hot-update endpoint (SSH alternative)
+# ==========================================
+import base64
+import importlib
+
+_HOTUPDATE_SECRET = os.getenv("HOTUPDATE_SECRET", "hub_hotupdate_2026")
+
+
+@router.post("/admin/hotupdate")
+async def hotupdate_files(payload: dict):
+    """
+    通过 HTTP API 热更新服务器 Python 文件（替代 SSH）。
+
+    Body:
+        secret: 认证密钥
+        files: {"relative/path.py": "base64-encoded-content", ...}
+        restart: bool (是否重启服务模块)
+    """
+    if payload.get("secret") != _HOTUPDATE_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+
+    files_data = payload.get("files", {})
+    if not files_data:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    import hub_server
+    hub_root = Path(hub_server.__file__).parent.parent
+
+    updated = []
+    for rel_path, b64_content in files_data.items():
+        # 安全检查：只允许更新 hub_server/ 和 client_sdk/ 目录
+        if ".." in rel_path or rel_path.startswith("/"):
+            continue
+        if not (rel_path.startswith("hub_server/") or rel_path.startswith("client_sdk/")):
+            continue
+
+        target = hub_root / rel_path
+        if not target.parent.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            content = base64.b64decode(b64_content).decode("utf-8")
+            # Remove BOM if present
+            if content.startswith("\ufeff"):
+                content = content[1:]
+            target.write_text(content, encoding="utf-8")
+            updated.append(rel_path)
+        except Exception as e:
+            updated.append(f"{rel_path} (FAILED: {e})")
+
+    # Hot-reload updated modules
+    reloaded = []
+    if payload.get("restart", True):
+        modules_to_reload = []
+        for rel_path in updated:
+            if "(FAILED" in rel_path:
+                continue
+            module_name = rel_path.replace("/", ".").replace(".py", "")
+            modules_to_reload.append(module_name)
+
+        for mod_name in modules_to_reload:
+            try:
+                if mod_name in sys.modules:
+                    importlib.reload(sys.modules[mod_name])
+                    reloaded.append(mod_name)
+            except Exception as e:
+                reloaded.append(f"{mod_name} (reload failed: {e})")
+
+    return {
+        "status": "updated",
+        "files": updated,
+        "reloaded": reloaded,
+    }

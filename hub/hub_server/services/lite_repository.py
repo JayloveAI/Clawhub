@@ -34,6 +34,7 @@ class PendingDemand:
     seeker_id: Optional[str]
     seeker_webhook_url: str
     created_at: str
+    original_task: str = ""
     status: str = "pending"
     matched_agent_id: Optional[str] = None
 
@@ -54,6 +55,7 @@ class LiteMemoryRepository:
                     demand_id TEXT PRIMARY KEY,
                     resource_type TEXT,
                     description TEXT,
+                    original_task TEXT DEFAULT '',
                     tags TEXT,
                     demand_vector BLOB,
                     seeker_id TEXT,
@@ -84,6 +86,12 @@ class LiteMemoryRepository:
                 CREATE INDEX IF NOT EXISTS idx_matched_agent_id
                 ON pending_demands(matched_agent_id)
             """)
+
+            # Migration: 为旧表添加 original_task 列（幂等）
+            try:
+                conn.execute("ALTER TABLE pending_demands ADD COLUMN original_task TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
 
     def _normalize_vector(self, vector: List[float], target_dim: int = None) -> np.ndarray:
         """
@@ -160,13 +168,14 @@ class LiteMemoryRepository:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO pending_demands
-                (demand_id, resource_type, description, tags, demand_vector,
+                (demand_id, resource_type, description, original_task, tags, demand_vector,
                  seeker_id, seeker_webhook_url, created_at, status, matched_agent_id, vector_dim)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 demand.demand_id,
                 demand.resource_type,
                 demand.description,
+                demand.original_task,
                 json.dumps(demand.tags),
                 vector_blob,
                 demand.seeker_id,
@@ -179,18 +188,19 @@ class LiteMemoryRepository:
         return demand
 
     def _load_demand_from_row(self, row: tuple) -> PendingDemand:
-        """从数据库行加载 PendingDemand 对象"""
+        """从数据库行加载 PendingDemand 对象（兼容新旧 schema）"""
         return PendingDemand(
             demand_id=row[0],
             resource_type=row[1],
             description=row[2],
-            tags=json.loads(row[3]),
-            demand_vector=self._blob_to_vector(row[4]),
-            seeker_id=row[5],
-            seeker_webhook_url=row[6],
-            created_at=row[7],
-            status=row[8],
-            matched_agent_id=row[9]
+            original_task=row[3] if len(row) > 10 else "",
+            tags=json.loads(row[4] if len(row) > 10 else row[3]),
+            demand_vector=self._blob_to_vector(row[5] if len(row) > 10 else row[4]),
+            seeker_id=row[6] if len(row) > 10 else row[5],
+            seeker_webhook_url=row[7] if len(row) > 10 else row[6],
+            created_at=row[8] if len(row) > 10 else row[7],
+            status=row[9] if len(row) > 10 else row[8],
+            matched_agent_id=row[10] if len(row) > 10 else row[9]
         )
 
     def find_matches(
@@ -234,7 +244,7 @@ class LiteMemoryRepository:
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                SELECT demand_id, resource_type, description, tags, demand_vector,
+                SELECT demand_id, resource_type, description, original_task, tags, demand_vector,
                        seeker_id, seeker_webhook_url, created_at, status, matched_agent_id
                 FROM pending_demands WHERE status = 'pending'
             """)
@@ -265,8 +275,11 @@ class LiteMemoryRepository:
         matches: List[Tuple[PendingDemand, float]] = []
         for demand, vector_sim, _ in top_k_candidates:
             tag_sim = self._jaccard_similarity(new_tags, demand.tags)
-            # V1.6.5: tag 权重提升至 40%（去噪后 tag 质量显著提高）
-            combined_score = vector_sim * 0.6 + tag_sim * 0.4
+            # V1.6.8: 当 demand.tags 为空时，退化为纯向量匹配（避免 tag_sim=0 拖死 score）
+            if not demand.tags:
+                combined_score = vector_sim
+            else:
+                combined_score = vector_sim * 0.6 + tag_sim * 0.4
 
             print(f"[DEBUG-REPO]   {demand.demand_id}: "
                   f"vector_sim={vector_sim:.4f}, tag_sim={tag_sim:.4f}, "
@@ -291,11 +304,20 @@ class LiteMemoryRepository:
                 (agent_id, demand_id)
             )
 
+    def mark_delivered(self, demand_id: str) -> bool:
+        """原子标记为已投递。仅在 status='matched' 时生效，防止多 Provider 竞态重复投递。"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE pending_demands SET status = 'delivered' WHERE demand_id = ? AND status = 'matched'",
+                (demand_id,)
+            )
+            return cursor.rowcount > 0
+
     def get_matched_demands_for_seeker(self, seeker_id: str) -> List[PendingDemand]:
         """查询指定 Seeker 的已匹配待收货订单"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                SELECT demand_id, resource_type, description, tags, demand_vector,
+                SELECT demand_id, resource_type, description, original_task, tags, demand_vector,
                        seeker_id, seeker_webhook_url, created_at, status, matched_agent_id
                 FROM pending_demands
                 WHERE seeker_id = ? AND status = 'matched'
@@ -306,7 +328,7 @@ class LiteMemoryRepository:
         """查询指定 Provider 的已匹配待发货订单"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                SELECT demand_id, resource_type, description, tags, demand_vector,
+                SELECT demand_id, resource_type, description, original_task, tags, demand_vector,
                        seeker_id, seeker_webhook_url, created_at, status, matched_agent_id
                 FROM pending_demands
                 WHERE matched_agent_id = ? AND status = 'matched'
@@ -317,7 +339,7 @@ class LiteMemoryRepository:
         """获取所有待处理需求"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                SELECT demand_id, resource_type, description, tags, demand_vector,
+                SELECT demand_id, resource_type, description, original_task, tags, demand_vector,
                        seeker_id, seeker_webhook_url, created_at, status, matched_agent_id
                 FROM pending_demands WHERE status = 'pending'
             """)
@@ -341,7 +363,7 @@ class LiteMemoryRepository:
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
-                SELECT demand_id, resource_type, description, tags, demand_vector,
+                SELECT demand_id, resource_type, description, original_task, tags, demand_vector,
                        seeker_id, seeker_webhook_url, created_at, status, matched_agent_id
                 FROM pending_demands
                 WHERE status = 'pending' AND created_at < ?

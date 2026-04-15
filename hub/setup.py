@@ -10,7 +10,7 @@ for pth_name in ["agentspace_bootstrap.pth", "agentspace_autoinit.pth"]:
 
 setup(
     name="agentspace-sdk",
-    version="1.6.7",  # V1.6.7: client-side tag extraction optimization + Hub-side denoising
+    version="1.6.8",  # V1.6.8: seeker auto-delivery + mark_matched + empty tags fallback
     packages=find_packages(),
     install_requires=[
         "httpx>=0.24.0",
@@ -25,6 +25,7 @@ setup(
         "rich>=13.0.0",
         "questionary>=2.0.0",
         "pyjwt>=2.8.0",
+        "jieba>=0.42.1",
     ],
     python_requires=">=3.8",
     entry_points={

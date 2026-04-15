@@ -39,12 +39,25 @@ def set_gateway_instance(gateway):
     _gateway_instance = gateway
 
 
-def _generate_local_token() -> str:
-    """生成动态 Token 并写入文件"""
-    token = secrets.token_hex(32)
+def _load_or_generate_local_token() -> str:
+    """加载已有 Token，仅在文件不存在时生成新 Token（无 BOM）。
+
+    复用策略：token 仅用于 localhost 本机认证（OpenClaw 插件 → 本地 API），
+    不存在远程攻击面。每次重启都重新生成会破坏与已运行插件的 token 一致性，
+    是 403 错误的直接根因。
+    """
     token_file = Path.home() / ".agentspace" / ".local_token"
     token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(token)
+
+    # 复用已有 token
+    if token_file.exists():
+        existing = token_file.read_text(encoding="utf-8").strip()
+        if len(existing) >= 16:
+            return existing
+
+    # 首次启动：生成新 token
+    token = secrets.token_hex(32)
+    token_file.write_text(token, encoding="utf-8")
     return token
 
 
@@ -55,7 +68,7 @@ class WebhookServer:
         self.app = FastAPI(title="Agent Webhook Receiver")
         self._task_cache = TaskCache()
         self._bridge = OpenClawBridge()
-        self._local_token = _generate_local_token()  # 启动时生成 Token
+        self._local_token = _load_or_generate_local_token()  # 复用已有 Token
         self._setup_routes()
         self._setup_middleware()
 
@@ -118,7 +131,8 @@ class WebhookServer:
 
             token = auth_header[7:]
             if token != self._local_token:
-                raise HTTPException(status_code=403, detail="Invalid token")
+                print(f"[WARN] Token mismatch: received {token[:8]}... expected {self._local_token[:8]}...")
+                raise HTTPException(status_code=403, detail="Invalid token - AgentSpace may have restarted, please retry")
 
             # ⚠️ [V1.6 优化] 强制 UTF-8 解码，避免中文乱码
             try:
@@ -133,21 +147,32 @@ class WebhookServer:
             user_id = body.get("user_id", "default_user")
             original_task = body.get("original_task", "")
 
-            gateway = _gateway_instance or UniversalResourceGateway()
-            demand_id = await gateway.publish_bounty_in_background(
-                error=ResourceMissingError(
-                    resource_type=body.get("resource_type", "resource"),
-                    description=body.get("description", "")
-                ),
-                original_task=original_task,
-                user_id=user_id
-            )
+            try:
+                gateway = _gateway_instance or UniversalResourceGateway()
+                demand_id = await gateway.publish_bounty_in_background(
+                    error=ResourceMissingError(
+                        resource_type=body.get("resource_type", "resource"),
+                        description=body.get("description", "")
+                    ),
+                    original_task=original_task,
+                    user_id=user_id
+                )
 
-            return {
-                "status": "published",
-                "demand_id": demand_id,
-                "original_task": original_task
-            }
+                return {
+                    "status": "published",
+                    "demand_id": demand_id,
+                    "original_task": original_task
+                }
+            except Exception as e:
+                print(f"[ERROR] trigger_demand failed: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    "status": "error",
+                    "demand_id": None,
+                    "original_task": original_task,
+                    "error": f"{type(e).__name__}: {e}"
+                }
 
         @self.app.delete("/api/local/demand/{demand_id}")
         async def cancel_demand(demand_id: str, request: Request):
@@ -507,45 +532,58 @@ class WebhookServer:
             if signal_data.get("action") == "wake_up_delivery":
                 demand_id = signal_data["demand_id"]
                 new_seeker_url = signal_data["new_seeker_url"]
+                resource_type = signal_data.get("resource_type", "")
+                description = signal_data.get("description", "")
 
                 print(f"[信令] 收到云端通知：需求方已上线！正在向新地址补发文件...")
 
-                # 1. 组装临时 matched_demand
+                # 1. 组装 matched_demand
                 matched_demand_mock = {
                     "demand_id": demand_id,
-                    "seeker_webhook_url": new_seeker_url  # Hub 已拼接好完整 URL
+                    "seeker_webhook_url": new_seeker_url,
+                    "resource_type": resource_type,
+                    "description": description,
                 }
 
                 # 2. 从本地找到要发送的文件
                 supply_dir = Path.home() / ".agentspace" / "supply_provided"
 
-                # ⚠️ 安全修正：根据 demand_id 推断 resource_type 并匹配文件
-                # 简化实现：从 demand_id 提取资源类型，或使用默认值
-                resource_type = "csv"  # 默认值
-                if "_" in demand_id:
-                    # 尝试从 demand_id 提取类型，如 "demand_csv_001" -> "csv"
-                    parts = demand_id.split("_")
-                    for part in parts:
-                        if part in ["csv", "pdf", "json", "txt", "xlsx"]:
+                # 优先用信号中的 resource_type，退化到 demand_id 猜测
+                if not resource_type and "_" in demand_id:
+                    for part in demand_id.split("_"):
+                        if part in ["csv", "pdf", "json", "txt", "xlsx", "md", "wav", "mp3", "mp4"]:
                             resource_type = part
                             break
+                if not resource_type:
+                    resource_type = "file"
 
-                demand_info = {"resource_type": resource_type}
+                demand_info = {"resource_type": resource_type, "description": description}
                 file_path = self._find_file_for_demand_safe(supply_dir, demand_info)
 
                 if file_path:
-                    # 3. 异步触发补发
+                    # 3. 异步触发补发 + 投递确认
                     from ..sender import P2PSender
                     sender = P2PSender()
-                    asyncio.create_task(
-                        sender.send_file_to_seeker(
-                            matched_demand=matched_demand_mock,
-                            file_path=str(file_path),
-                            provider_id="local_provider"
-                        )
-                    )
+
+                    async def _deliver_and_confirm():
+                        try:
+                            success = await sender.deliver_file(
+                                matched_demand=matched_demand_mock,
+                                file_path=str(file_path),
+                                provider_id="local_provider"
+                            )
+                            if success:
+                                print(f"[信令] 投递成功: {file_path.name} -> {demand_id[:12]}...")
+                                # 投递确认：通知 Hub 标记 demand 为 delivered
+                                await self._confirm_delivery_to_hub(demand_id)
+                            else:
+                                print(f"[信令] 投递失败: {file_path.name} -> {demand_id[:12]}...")
+                        except Exception as e:
+                            print(f"[信令] 投递异常: {e}")
+
+                    asyncio.create_task(_deliver_and_confirm())
                 else:
-                    print(f"[WARNING] 无法找到匹配的文件，跳过自动发货")
+                    print(f"[信令] 无法在 supply_provided/ 中找到匹配的 {resource_type} 文件，跳过自动发货")
 
             return {"status": "signal_received"}
 
@@ -553,19 +591,44 @@ class WebhookServer:
         """
         安全的本地文件查找
 
-        ⚠️ 防止发错文件：必须根据 resource_type 匹配文件后缀
+        策略：先按后缀匹配，多个候选时用 description 关键词排序选最佳匹配。
         """
         if not supply_dir.exists():
             return None
 
         resource_type = demand_info.get("resource_type", "csv")
+        description = demand_info.get("description", "")
         expected_ext = f".{resource_type}"
 
-        for file in supply_dir.iterdir():
-            if file.is_file() and file.suffix == expected_ext:
-                return file
+        candidates = [f for f in supply_dir.iterdir() if f.is_file() and f.suffix == expected_ext]
 
-        return None
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # 多候选：用 description 中的关键词对文件名打分，选最佳
+        if description:
+            desc_lower = description.lower()
+            best = max(candidates, key=lambda f: sum(1 for w in desc_lower.split() if w in f.name.lower()))
+            return best
+
+        return candidates[0]
+
+    async def _confirm_delivery_to_hub(self, demand_id: str):
+        """投递成功后通知 Hub 标记 demand 为 delivered"""
+        import httpx
+        url = f"{HUB_URL}{API_V1_PREFIX}/demand_status"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.put(url, json={
+                    "demand_id": demand_id,
+                    "status": "delivered",
+                    "provider_id": "local_provider",
+                })
+                print(f"[信令] Delivery confirmed to Hub: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"[WARNING] Delivery confirmation failed: {e}")
 
     async def _cancel_hub_demand(self, demand_id: str):
         """通知 Hub 删除云端需求"""
